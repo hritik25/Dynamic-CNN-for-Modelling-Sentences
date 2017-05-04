@@ -1,4 +1,6 @@
+import lasagne
 from lasagne.layers import Layer, EmbeddingLayer
+import theano.tensor as T
 
 
 class sentenceEmbeddingLayer(EmbeddingLayer):
@@ -8,10 +10,10 @@ class sentenceEmbeddingLayer(EmbeddingLayer):
             output_size = embeddingDimension, **kwargs)
 
         # One 'zero' embedding needs to be present to account for the out-of-vocabulary words
-        self.W = T.concatenate(self.W, T.zeros((1, embeddingDimension)))
+        self.W = T.concatenate((self.W, T.zeros((1, embeddingDimension))))
 
     # FUNCTIONS TO BE OVERRIDDEN FOR THE ARCHITECTURE OF DCNN
-    def get_output_for(self, input):
+    def get_output_for(self, input, **kwargs):
         # For a sentence in a batch, the sentence matrix should be passed to the covolutional
         # layers with dimensions 'd' x 'm', as described in Kalchbrenner's paper .
         return T.transpose(self.W[input], (0,2,1))
@@ -19,7 +21,7 @@ class sentenceEmbeddingLayer(EmbeddingLayer):
     # self.input_shape is a 2-tuple
     # self.input_shape[0] denotes batch size
     # self.input_shape[1] denotes sentences length (uniform throughout the batch)
-    def get_output_shape_for(self, input):
+    def get_output_shape_for(self, input, **kwargs):
         return (self.input_shape[0], self.output_size, self.input_shape[1])
 
 
@@ -33,37 +35,36 @@ class convolution1dLayer(Layer):
                     'valid' for narrow convolutions.
     """
     def __init__(self, incoming, numOfFilters, filterSize, 
-        W = lasagne.init.GlorotUniform(), b = lasagne.init.constant(0), 
-        border_mode = 'full', **kwargs):
-        super(convolutions1d, self).__init__(incoming, **kwargs)
+        W = lasagne.init.GlorotUniform(), b = lasagne.init.Constant(0.), 
+        borderMode = 'full', **kwargs):
+        super(convolution1dLayer, self).__init__(incoming, **kwargs)
 
-    # Shape of the input:
-    # If it is the first convolutional layer, i.e. just after the sentenceEmbeddingLayer,
-    # then the input shape will be 3(batch size, embeddingDimension, length of sentences).
-    # If it is not the first convolutional layer, then input shape 
-    # will be 4(batch size, no of input channels, embeddingDimesion, length of sentences ) 
-    if len(self.input_shape) == 3:
-        self.numOfInputChannels = 1
-        self.numOfRows = self.input_shape[1]
-    else:
-        self.numOfInputChannels = self.input_shape[1]
-        self.numOfRows = self.input_shape[2]
+        # Shape of the input:
+        # If it is the first convolutional layer, i.e. just after the sentenceEmbeddingLayer,
+        # then the input shape will be 3(batch size, embeddingDimension, length of sentences).
+        # If it is not the first convolutional layer, then input shape 
+        # will be 4(batch size, no of input channels, embeddingDimesion, length of sentences ) 
+        if len(self.input_shape) == 3:
+            self.numOfInputChannels = 1
+            self.numOfRows = self.input_shape[1]
+        else:
+            self.numOfInputChannels = self.input_shape[1]
+            self.numOfRows = self.input_shape[2]
 
-    self.numOfFilters = numOfFilters
-    self.filterSize = filterSize
-    self.borderMode = border_mode
-    self.nonLinearity = nonLinearity
+        self.numOfFilters = numOfFilters
+        self.filterSize = filterSize
+        self.borderMode = borderMode
 
-    # To register the parameters for this layer
-    # 1. W : The filters for the convolutions
-    # 2. b : The bias values for each filter   
-    self.W = self.add_param(W, shape = (self.numOfFilters, self.numOfInputChannels, self.numOfRows, self.filterSize))
-    if b:
-        self.b = self.add_param(b, shape = (self.numOfFilters,))
-    else:
-        self.b = None
+        # To register the parameters for this layer
+        # 1. W : The filters for the convolutions
+        # 2. b : The bias values for each filter   
+        self.W = self.add_param(W, shape = (self.numOfFilters, self.numOfInputChannels, self.numOfRows, self.filterSize))
+        if b:
+            self.b = self.add_param(b, shape = (self.numOfFilters,))
+        else:
+            self.b = None
 
-    def get_output_for(self, input):
+    def get_output_for(self, input, **kwargs):
 
         # Theano does not support 1d convolutions, so to convolve row wise on the sentence matrix,
         # each row will be passed one by one to the tensor.nnet.conv2d function of theano and the 
@@ -73,8 +74,10 @@ class convolution1dLayer(Layer):
         if len(self.input_shape) == 3: # if this is the first convolution1dLayer layer
             # self.input_shape[0] represents batch size.
             inputShape = (self.input_shape[0], self.numOfInputChannels, 1, self.input_shape[2])
+            feedInput = input.dimshuffle(0, 'x', 1, 2)
         else:
             inputShape = (self.input_shape[0], self.numOfInputChannels, 1, self.input_shape[3])
+            feedInput = input
         
         # The shape of the filter needs to be provided as an argument to the T.nnet.conv2d function
         filterShape = (self.numOfFilters, self.numOfInputChannels, 1, self.filterSize)
@@ -83,11 +86,11 @@ class convolution1dLayer(Layer):
 
         for i in xrange(self.numOfRows):
             convolutions.append(
-                T.nnet.conv2d(input[:,:,i,:].dimshuffle(0,1,'x',2), 
+                T.nnet.conv2d(feedInput[:,:,i,:].dimshuffle(0,1,'x',2), 
                     self.W[:,:,i,:].dimshuffle(0,1,'x',2),
                     input_shape = inputShape,
                     filter_shape = filterShape,
-                    border_mode = self.borderMode
+                    border_mode = self.borderMode,
                     subsample = (1,1)
                 )
             )
@@ -101,10 +104,8 @@ class convolution1dLayer(Layer):
 
     def get_output_shape_for(self, inputShape):
         
-        if self.borderMode == 'full':
-            numOfOutputCols = inputShape[-1]+self.filterSize-1
-        elif self.borderMode == 'valid':
-            numOfOutputCols = inputShape[-1]-self.filterSize+1
+        numOfOutputCols = lasagne.layers.conv.conv_output_length(inputShape[-1], 
+            self.filterSize, 1, self.borderMode) # 1 is for the 1d stride
 
         outputShape = (inputShape[0], self.numOfFilters, self.numOfRows, numOfOutputCols)
         return outputShape
